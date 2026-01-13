@@ -26,22 +26,27 @@ export async function getMessages(req: Request, res: Response) {
   res.json(msgs);
 }
 
-const sendSchema = z.object({ content: z.string().trim().min(1) });
+const optionsEnum = z.enum(['all', 'bg', 'en', 'old']);
+const sendSchema = z.object({
+  content: z.string().trim().min(1),
+  options: optionsEnum.optional().default('all'),
+});
 export const validateSend = validateBody(sendSchema);
 export async function postSend(req: Request, res: Response) {
-  const { content } = (req as any).validatedBody as z.infer<typeof sendSchema>;
-  const result = await addUserAndAssistantMessage(req.user!.id, req.params.id, content);
+  const { content, options } = (req as any).validatedBody as z.infer<typeof sendSchema>;
+  const result = await addUserAndAssistantMessage(req.user!.id, req.params.id, content, options);
   res.status(201).json(result);
 }
 
 const editSchema = z.object({
   messageId: z.string(),
   content: z.string().trim().min(1),
+  options: optionsEnum.optional().default('all'),
 });
 export const validateEdit = validateBody(editSchema);
 export async function postEdit(req: Request, res: Response) {
-  const { messageId, content } = (req as any).validatedBody as z.infer<typeof editSchema>;
-  const result = await editAndResend(req.user!.id, req.params.id, messageId, content);
+  const { messageId, content, options } = (req as any).validatedBody as z.infer<typeof editSchema>;
+  const result = await editAndResend(req.user!.id, req.params.id, messageId, content, options);
   res.status(201).json(result);
 }
 

@@ -3,6 +3,8 @@ import type { Types } from 'mongoose';
 import { ApiError } from '../utils/ApiError.js';
 import { env } from '../config/env.js';
 
+type SourceOption = 'all' | 'bg' | 'en' | 'old';
+
 export async function listChats(userId: string) {
 const chats = (await Chat.find({ userId })
 .sort({ createdAt: -1 })
@@ -50,13 +52,14 @@ metadata: m.metadata || undefined,
 }));
 }
 
-export async function addUserAndAssistantMessage(userId: string, chatId: string, content: string) {
+export async function addUserAndAssistantMessage(userId: string, chatId: string, content: string, options: SourceOption = 'all') {
 const chat = await Chat.findOne({ _id: chatId, userId });
 if (!chat) throw new ApiError(404, 'Chat not found');
+const selectedOption: SourceOption = options || 'all';
 
 // Check if this is the first message to set a title from it
 const countBefore = await Message.countDocuments({ chatId: chat._id });
-const userMsg = await Message.create({ chatId: chat._id, role: 'user', content });
+const userMsg = await Message.create({ chatId: chat._id, role: 'user', content, metadata: { options: selectedOption } });
 if (countBefore === 0) {
 const snippet = content.length > 50 ? content.slice(0, 50) + '…' : content;
 await Chat.updateOne({ _id: chat._id }, { $set: { title: snippet } });
@@ -68,6 +71,9 @@ role: 'user',
 content,
 _id: { $ne: userMsg._id },
 createdAt: { $lt: userMsg.createdAt },
+...(selectedOption === 'all'
+  ? { $or: [{ 'metadata.options': { $exists: false } }, { 'metadata.options': selectedOption }] }
+  : { 'metadata.options': selectedOption }),
 })
 .sort({ createdAt: -1 })
 .lean()
@@ -84,11 +90,12 @@ createdAt: { $gte: cachedUser.createdAt },
 .exec()) as { _id: Types.ObjectId; content: string; metadata?: any } | null;
 
 if (cachedAssistant && cachedAssistant.content) {
+  const cachedMetadata = cachedAssistant.metadata || {};
   const assistantMsg = await Message.create({
     chatId: chat._id,
     role: 'assistant',
     content: cachedAssistant.content,
-    metadata: cachedAssistant.metadata || undefined,
+    metadata: { ...cachedMetadata, options: (cachedMetadata as any).options ?? selectedOption },
   });
   return {
     userMessage: {
@@ -96,6 +103,7 @@ if (cachedAssistant && cachedAssistant.content) {
       content: userMsg.content,
       role: 'user' as const,
       createdAt: userMsg.createdAt,
+      metadata: userMsg.metadata || undefined,
     },
     assistantMessage: {
       id: String(assistantMsg._id as Types.ObjectId),
@@ -114,7 +122,7 @@ try {
 const res = await fetch(env.GENERATE_URL, {
 method: 'POST',
 headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ question: content }),
+body: JSON.stringify({ question: content, options: selectedOption }),
 });
 if (!res.ok) throw new Error(`Upstream error ${res.status}`);
 payload = await res.json();
@@ -132,6 +140,7 @@ indices: payload.indices ?? [],
 sources: payload.sources ?? [],
 matches: payload.matches ?? [],
 results_count: payload.results_count ?? 0,
+options: selectedOption,
 };
 
 const assistantMsg = await Message.create({ chatId: chat._id, role: 'assistant', content: summary, metadata });
@@ -142,6 +151,7 @@ id: String(userMsg._id as Types.ObjectId),
 content: userMsg.content,
 role: 'user' as const,
 createdAt: userMsg.createdAt,
+metadata: userMsg.metadata || undefined,
 },
 assistantMessage: {
 id: String(assistantMsg._id as Types.ObjectId),
@@ -153,9 +163,10 @@ metadata,
 };
 }
 
-export async function editAndResend(userId: string, chatId: string, userMessageId: string, content: string) {
+export async function editAndResend(userId: string, chatId: string, userMessageId: string, content: string, options: SourceOption = 'all') {
 const chat = await Chat.findOne({ _id: chatId, userId });
 if (!chat) throw new ApiError(404, 'Chat not found');
+const selectedOption: SourceOption = options || 'all';
 
 const userMsg = await Message.findOne({ _id: userMessageId, chatId: chat._id, role: 'user' });
 if (!userMsg) throw new ApiError(404, 'Message not found');
@@ -171,6 +182,7 @@ if (!trimmed) throw new ApiError(400, 'Content is required');
 
 // Update the user message in-place with new content
 userMsg.content = trimmed;
+userMsg.metadata = { ...(userMsg.metadata || {}), options: selectedOption };
 await userMsg.save();
 
 // Remove the assistant message that follows (if any)
@@ -188,6 +200,9 @@ const cachedUser = (await Message.findOne({
 role: 'user',
 content: trimmed,
 _id: { $ne: userMsg._id },
+...(selectedOption === 'all'
+  ? { $or: [{ 'metadata.options': { $exists: false } }, { 'metadata.options': selectedOption }] }
+  : { 'metadata.options': selectedOption }),
 })
 .sort({ createdAt: -1 })
 .lean()
@@ -204,11 +219,12 @@ createdAt: { $gte: cachedUser.createdAt },
 .exec()) as { _id: Types.ObjectId; content: string; metadata?: any } | null;
 
 if (cachedAssistant && cachedAssistant.content) {
+  const cachedMetadata = cachedAssistant.metadata || {};
   const assistantMsg = await Message.create({
     chatId: chat._id,
     role: 'assistant',
     content: cachedAssistant.content,
-    metadata: cachedAssistant.metadata || undefined,
+    metadata: { ...cachedMetadata, options: (cachedMetadata as any).options ?? selectedOption },
   });
   return {
     userMessage: {
@@ -234,7 +250,7 @@ try {
 const res = await fetch(env.GENERATE_URL, {
 method: 'POST',
 headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ question: trimmed }),
+body: JSON.stringify({ question: trimmed, options: selectedOption }),
 });
 if (!res.ok) throw new Error(`Upstream error ${res.status}`);
 payload = await res.json();
@@ -252,6 +268,7 @@ indices: payload.indices ?? [],
 sources: payload.sources ?? [],
 matches: payload.matches ?? [],
 results_count: payload.results_count ?? 0,
+options: selectedOption,
 };
 
 const assistantMsg = await Message.create({ chatId: chat._id, role: 'assistant', content: summary, metadata });
@@ -262,6 +279,7 @@ id: String(userMsg._id as Types.ObjectId),
 content: userMsg.content,
 role: 'user' as const,
 createdAt: userMsg.createdAt,
+metadata: userMsg.metadata || undefined,
 },
 assistantMessage: {
 id: String(assistantMsg._id as Types.ObjectId),
