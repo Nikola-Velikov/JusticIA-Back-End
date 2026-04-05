@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import api from './routes/index.js';
+import searchRoutes from './routes/searchRoutes.js';
 import { env } from './config/env.js';
 import { errorHandler, notFound } from './middlewares/errorHandler.js';
 
@@ -26,6 +27,9 @@ app.use(
 
 // Logging
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// Search proxy route
+app.use(searchRoutes);
 
 // Routes
 app.use('/api', api);

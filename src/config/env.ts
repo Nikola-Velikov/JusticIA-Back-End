@@ -9,6 +9,7 @@ export const env = {
   CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
   JWT_SECRET: process.env.JWT_SECRET || 'dev-secret',
   GENERATE_URL: process.env.GENERATE_URL || 'http://127.0.0.1:8000/generate',
+  SEARCH_URL: process.env.SEARCH_URL || 'http://127.0.0.1:3001/search',
 };
 
 if (!env.MONGO_URI) {
