@@ -5,6 +5,171 @@ import { env } from '../config/env.js';
 
 type SourceOption = 'all' | 'bg' | 'en' | 'old';
 
+const ELLIPSIS = '...';
+const MAX_ASSISTANT_CONTENT_BYTES = 128 * 1024;
+const MAX_METADATA_BYTES = 512 * 1024;
+const MAX_TERM_BYTES = 512;
+const MAX_INDEX_BYTES = 512;
+const MAX_SOURCE_TITLE_BYTES = 512;
+const MAX_SOURCE_INDEX_BYTES = 1024;
+const MAX_MATCH_BYTES = 4096;
+const MAX_MATCHES_BYTES = 256 * 1024;
+const MAX_INDICES = 25;
+const MAX_SOURCES = 25;
+const MAX_MATCHES = 80;
+
+type AssistantMetadata = {
+term?: string;
+indices?: string[];
+sources?: Array<{ index: string; title: string }>;
+matches?: string[];
+results_count?: number;
+options: SourceOption;
+truncated?: boolean;
+};
+
+function byteLength(value: string) {
+return Buffer.byteLength(value, 'utf8');
+}
+
+function truncateUtf8(value: unknown, maxBytes: number) {
+if (typeof value !== 'string') return '';
+if (maxBytes <= byteLength(ELLIPSIS)) return ELLIPSIS.slice(0, Math.max(0, maxBytes));
+if (byteLength(value) <= maxBytes) return value;
+
+let out = '';
+for (const char of value) {
+  if (byteLength(out) + byteLength(char) + byteLength(ELLIPSIS) > maxBytes) break;
+  out += char;
+}
+
+return `${out}${ELLIPSIS}`;
+}
+
+function sanitizeStringArray(
+value: unknown,
+maxItems: number,
+maxItemBytes: number,
+totalBytes?: number
+) {
+if (!Array.isArray(value)) return { value: [] as string[], truncated: false };
+
+const out: string[] = [];
+let truncated = false;
+let total = 0;
+
+for (const entry of value) {
+  if (typeof entry !== 'string') {
+    truncated = true;
+    continue;
+  }
+  if (out.length >= maxItems) {
+    truncated = true;
+    break;
+  }
+
+  const next = truncateUtf8(entry, maxItemBytes);
+  if (next !== entry) truncated = true;
+
+  const nextBytes = byteLength(next);
+  if (typeof totalBytes === 'number' && total + nextBytes > totalBytes) {
+    truncated = true;
+    break;
+  }
+
+  out.push(next);
+  total += nextBytes;
+}
+
+return { value: out, truncated };
+}
+
+function sanitizeSources(value: unknown) {
+if (!Array.isArray(value)) {
+  return { value: [] as Array<{ index: string; title: string }>, truncated: false };
+}
+
+const out: Array<{ index: string; title: string }> = [];
+let truncated = false;
+
+for (const entry of value) {
+  if (!entry || typeof entry !== 'object') {
+    truncated = true;
+    continue;
+  }
+  if (out.length >= MAX_SOURCES) {
+    truncated = true;
+    break;
+  }
+
+  const record = entry as Record<string, unknown>;
+  const title = truncateUtf8(record.title ?? '', MAX_SOURCE_TITLE_BYTES).trim();
+  const index = truncateUtf8(record.index ?? '', MAX_SOURCE_INDEX_BYTES).trim();
+
+  if ((record.title ?? '') !== title || (record.index ?? '') !== index) truncated = true;
+  if (!title && !index) {
+    truncated = true;
+    continue;
+  }
+
+  out.push({ title: title || 'Untitled source', index });
+}
+
+return { value: out, truncated };
+}
+
+function sanitizeResultsCount(value: unknown) {
+if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+return Math.max(0, Math.trunc(value));
+}
+
+function buildAssistantMetadata(payload: any, selectedOption: SourceOption): AssistantMetadata {
+const safeTerm = truncateUtf8(payload?.term ?? '', MAX_TERM_BYTES).trim();
+const safeIndices = sanitizeStringArray(payload?.indices, MAX_INDICES, MAX_INDEX_BYTES);
+const safeSources = sanitizeSources(payload?.sources);
+const safeMatches = sanitizeStringArray(payload?.matches, MAX_MATCHES, MAX_MATCH_BYTES, MAX_MATCHES_BYTES);
+
+const metadata: AssistantMetadata = {
+  term: safeTerm || undefined,
+  indices: safeIndices.value,
+  sources: safeSources.value,
+  matches: safeMatches.value,
+  results_count: sanitizeResultsCount(payload?.results_count),
+  options: selectedOption,
+};
+
+let truncated = safeTerm !== (typeof payload?.term === 'string' ? payload.term : '')
+  || safeIndices.truncated
+  || safeSources.truncated
+  || safeMatches.truncated;
+
+while (byteLength(JSON.stringify(metadata)) > MAX_METADATA_BYTES && metadata.matches && metadata.matches.length > 0) {
+  metadata.matches.pop();
+  truncated = true;
+}
+while (byteLength(JSON.stringify(metadata)) > MAX_METADATA_BYTES && metadata.sources && metadata.sources.length > 0) {
+  metadata.sources.pop();
+  truncated = true;
+}
+while (byteLength(JSON.stringify(metadata)) > MAX_METADATA_BYTES && metadata.indices && metadata.indices.length > 0) {
+  metadata.indices.pop();
+  truncated = true;
+}
+if (byteLength(JSON.stringify(metadata)) > MAX_METADATA_BYTES && metadata.term) {
+  metadata.term = truncateUtf8(metadata.term, 128);
+  truncated = true;
+}
+
+if (truncated) metadata.truncated = true;
+return metadata;
+}
+
+function sanitizeAssistantContent(value: unknown) {
+const summary = typeof value === 'string' ? value : '';
+const safeSummary = truncateUtf8(summary, MAX_ASSISTANT_CONTENT_BYTES).trim();
+return safeSummary || 'РќСЏРјР° РЅР°Р»РёС‡РµРЅ РѕС‚РіРѕРІРѕСЂ.';
+}
+
 export async function listChats(userId: string) {
 const chats = (await Chat.find({ userId })
 .sort({ createdAt: -1 })
@@ -48,7 +213,9 @@ id: String(m._id as Types.ObjectId),
 role: m.role,
 content: m.content,
 createdAt: m.createdAt,
-metadata: m.metadata || undefined,
+metadata: m.role === 'assistant'
+  ? buildAssistantMetadata(m.metadata || {}, ((m.metadata as any)?.options as SourceOption) || 'all')
+  : (m.metadata || undefined),
 }));
 }
 
@@ -91,11 +258,16 @@ createdAt: { $gte: cachedUser.createdAt },
 
 if (cachedAssistant && cachedAssistant.content) {
   const cachedMetadata = cachedAssistant.metadata || {};
+  const assistantContent = sanitizeAssistantContent(cachedAssistant.content);
+  const assistantMetadata = buildAssistantMetadata(
+    { ...cachedMetadata, options: (cachedMetadata as any).options ?? selectedOption },
+    selectedOption
+  );
   const assistantMsg = await Message.create({
     chatId: chat._id,
     role: 'assistant',
-    content: cachedAssistant.content,
-    metadata: { ...cachedMetadata, options: (cachedMetadata as any).options ?? selectedOption },
+    content: assistantContent,
+    metadata: assistantMetadata,
   });
   return {
     userMessage: {
@@ -134,16 +306,10 @@ let summary: string = typeof payload.summary === 'string' ? payload.summary : ''
 if (!summary || summary.trim().length === 0) {
 summary = 'Няма наличен отговор.';
 }
-const metadata = {
-term: payload.term,
-indices: payload.indices ?? [],
-sources: payload.sources ?? [],
-matches: payload.matches ?? [],
-results_count: payload.results_count ?? 0,
-options: selectedOption,
-};
+const assistantContent = sanitizeAssistantContent(summary);
+const assistantMetadata = buildAssistantMetadata(payload, selectedOption);
 
-const assistantMsg = await Message.create({ chatId: chat._id, role: 'assistant', content: summary, metadata });
+const assistantMsg = await Message.create({ chatId: chat._id, role: 'assistant', content: assistantContent, metadata: assistantMetadata });
 
 return {
 userMessage: {
@@ -158,7 +324,7 @@ id: String(assistantMsg._id as Types.ObjectId),
 content: assistantMsg.content,
 role: 'assistant' as const,
 createdAt: assistantMsg.createdAt,
-metadata,
+metadata: assistantMetadata,
 },
 };
 }
@@ -220,11 +386,16 @@ createdAt: { $gte: cachedUser.createdAt },
 
 if (cachedAssistant && cachedAssistant.content) {
   const cachedMetadata = cachedAssistant.metadata || {};
+  const assistantContent = sanitizeAssistantContent(cachedAssistant.content);
+  const assistantMetadata = buildAssistantMetadata(
+    { ...cachedMetadata, options: (cachedMetadata as any).options ?? selectedOption },
+    selectedOption
+  );
   const assistantMsg = await Message.create({
     chatId: chat._id,
     role: 'assistant',
-    content: cachedAssistant.content,
-    metadata: { ...cachedMetadata, options: (cachedMetadata as any).options ?? selectedOption },
+    content: assistantContent,
+    metadata: assistantMetadata,
   });
   return {
     userMessage: {
@@ -262,16 +433,10 @@ let summary: string = typeof payload.summary === 'string' ? payload.summary : ''
 if (!summary || summary.trim().length === 0) {
 summary = 'Няма наличен отговор.';
 }
-const metadata = {
-term: payload.term,
-indices: payload.indices ?? [],
-sources: payload.sources ?? [],
-matches: payload.matches ?? [],
-results_count: payload.results_count ?? 0,
-options: selectedOption,
-};
+const assistantContent = sanitizeAssistantContent(summary);
+const assistantMetadata = buildAssistantMetadata(payload, selectedOption);
 
-const assistantMsg = await Message.create({ chatId: chat._id, role: 'assistant', content: summary, metadata });
+const assistantMsg = await Message.create({ chatId: chat._id, role: 'assistant', content: assistantContent, metadata: assistantMetadata });
 
 return {
 userMessage: {
@@ -286,7 +451,7 @@ id: String(assistantMsg._id as Types.ObjectId),
 content: assistantMsg.content,
 role: 'assistant' as const,
 createdAt: assistantMsg.createdAt,
-metadata,
+metadata: assistantMetadata,
 },
 };
 }
